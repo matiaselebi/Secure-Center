@@ -1,0 +1,30 @@
+# SecureCenter orquesta los otros tres proyectos: no reimplementa nada, solo
+# los prende/apaga y muestra su estado. Necesita saber dónde están.
+
+paths:
+  # Vacío = autodetectar. SecureCenter busca los tres entre las carpetas
+  # hermanas (las que están al lado suyo, dentro de tu carpeta de proyectos),
+  # reconociéndolos por su paquete (src/secureproxy, src/securedns,
+  # src/securevpn) sin importar cómo se llame la carpeta.
+  # Si los tenés en otro lado, poné acá la ruta a cada carpeta, por ejemplo:
+  #   proxy: "C:/Users/vos/Proyectos/Secure-Proxy"
+  proxy: ""
+  dns: ""
+  vpn: ""
+
+ports:
+  # SecureProxy tiene DOS puertos: por el 8888 proxea (es el que dice si el
+  # servicio está vivo y el que se libera para apagarlo) y en el 8889 sirve su
+  # dashboard, que vive en su propio puerto.
+  proxy_service: 8888
+  proxy_dashboard: 8889
+  # SecureDNS y SecureVPN usan un solo puerto para su panel.
+  dns_dashboard: 8890
+  vpn_dashboard: 8891
+  # Puerto del dashboard unificado de SecureCenter.
+  center_dashboard: 8899
+
+dashboard_host: "127.0.0.1"
+
+logging:
+  db_path: "data/center_logs.db"
