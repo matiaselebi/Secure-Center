@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 
 from .config_loader import Config
+from .projects import PROJECT_SPECS
 
 # Estados posibles de un servicio.
 APAGADO = "apagado"
@@ -60,6 +61,12 @@ def _port_for(key: str, cfg: Config) -> int | None:
         "proxy": cfg.ports.proxy_service,
         "dns": cfg.ports.dns_dashboard,
         "vpn": cfg.ports.vpn_dashboard,
+        "hips": cfg.ports.hips_dashboard,
+        "intel": cfg.ports.intel_dashboard,
+        "scanner": cfg.ports.scanner_dashboard,
+        # El de ingesta y no el panel: es el que dice si el servicio que
+        # recibe telemetría está vivo, que es lo que importa.
+        "agente": cfg.ports.agente_ingesta,
     }.get(key)
 
 
@@ -99,9 +106,15 @@ def project_state(key: str, cfg: Config, timeout: float = 1.5) -> str:
 def health_snapshot(cfg: Config) -> dict[str, bool]:
     """Compatibilidad: True si el PROCESO está corriendo (lo que usan los
     scripts para decidir si hay algo que apagar)."""
-    return {key: project_alive(key, cfg) for key in ("proxy", "dns", "vpn")}
+    return {s.key: project_alive(s.key, cfg) for s in PROJECT_SPECS}
 
 
 def state_snapshot(cfg: Config) -> dict[str, str]:
-    """Estado detallado de los tres, para mostrar en el dashboard."""
-    return {key: project_state(key, cfg) for key in ("proxy", "dns", "vpn")}
+    """Estado detallado de todos, para mostrar en el dashboard.
+
+    Recorre `PROJECT_SPECS` y no una tupla escrita a mano: así, agregar un
+    proyecto al registro alcanza para que aparezca acá. La lista escrita a
+    mano era justamente lo que hacía que sumar una herramienta significara
+    tocar seis archivos y olvidarse de alguno.
+    """
+    return {s.key: project_state(s.key, cfg) for s in PROJECT_SPECS}

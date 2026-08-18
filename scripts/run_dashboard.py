@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Punto de entrada del dashboard unificado de SecureCenter (puerto 8899)."""
 
+import json
 import os
 import sys
 from pathlib import Path
+
+import psutil
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -26,7 +29,11 @@ def main() -> None:
     server = build_dashboard_server(cfg.dashboard_host, cfg.ports.center_dashboard, orchestrator, logger_db)
 
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(os.getpid()))
+    PID_FILE.write_text(json.dumps({
+        "pid": os.getpid(),
+        "create_time": psutil.Process(os.getpid()).create_time(),
+        "script": str(Path(__file__).resolve()),
+    }), encoding="utf-8")
 
     print(f"[SecureCenter] dashboard: http://{cfg.dashboard_host}:{cfg.ports.center_dashboard}/")
     for key, project in projects.items():

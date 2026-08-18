@@ -17,9 +17,11 @@ Por qué existe este módulo:
 
 import ctypes
 import platform
+import socket
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 # Windows: ejecutar sin abrir ventana de consola. En Linux/macOS es 0.
 NO_WINDOW = 0x08000000 if platform.system() == "Windows" else 0
@@ -95,15 +97,58 @@ def run_streaming(argv, cwd=None, timeout=60, on_line=None) -> int:
     return codigo
 
 
-def popen_quiet(argv, cwd=None) -> subprocess.Popen:
-    """Lanza un proceso que queda corriendo, sin ventana ni salida colgando."""
-    return subprocess.Popen(
-        argv,
-        cwd=cwd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=NO_WINDOW,
-    )
+def popen_quiet(argv, cwd=None, log=None) -> subprocess.Popen:
+    """Lanza un proceso que queda corriendo, sin ventana.
+
+    `log` es la ruta donde se guarda lo que imprime, y no es un lujo: sin eso,
+    un servicio que arranca, escribe el motivo por el que no puede seguir y se
+    muere, deja EXACTAMENTE el mismo rastro que uno que arrancó bien. La salida
+    iba a DEVNULL, así que el único camino era "corré su run_*.py a mano en una
+    consola", que es pedirle a la persona que haga de depurador.
+
+    Se abre en modo "w" y no "a": interesa el ÚLTIMO intento. Un archivo que
+    crece con los veinte arranques anteriores obliga a buscar cuál es el de
+    ahora, y ahí ya perdiste.
+    """
+    salida = subprocess.DEVNULL
+    archivo = None
+    if log:
+        try:
+            Path(log).parent.mkdir(parents=True, exist_ok=True)
+            archivo = open(log, "w", encoding="utf-8", errors="replace")  # noqa: SIM115
+            salida = archivo
+        except OSError:
+            # No poder escribir el log no puede impedir que el servicio
+            # arranque: se pierde el diagnóstico, no el servicio.
+            salida = subprocess.DEVNULL
+    try:
+        return subprocess.Popen(
+            argv,
+            cwd=cwd,
+            stdout=salida,
+            stderr=subprocess.STDOUT if archivo is not None else subprocess.DEVNULL,
+            creationflags=NO_WINDOW,
+        )
+    finally:
+        # El hijo ya tiene su propia copia del descriptor; esta se cierra.
+        if archivo is not None:
+            archivo.close()
+
+
+def ultimas_lineas(ruta, cuantas: int = 8) -> str:
+    """Las últimas líneas de un archivo de arranque, en una sola frase.
+
+    Se descartan las decorativas (los `====` de los banners) porque lo que se
+    busca es el motivo, y un banner ocupando seis de las ocho líneas es el
+    motivo tapado.
+    """
+    try:
+        crudo = Path(ruta).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    lineas = [linea.strip() for linea in crudo.splitlines() if linea.strip()]
+    lineas = [linea for linea in lineas if set(linea) != {"="}]
+    return " | ".join(lineas[-cuantas:])
 
 
 def is_admin() -> bool:
@@ -202,17 +247,44 @@ def parse_ss_listening(output: str, port: int) -> set[int]:
     pids: set[int] = set()
     for line in output.splitlines():
         parts = line.split()
-        if len(parts) < 4:
+        if len(parts) < 5 or parts[0].upper() != "LISTEN":
             continue
-        # La dirección local es la penúltima antes de la remota; se busca el
-        # campo que termine en ":<puerto>".
-        local = next(
-            (p for p in parts if p.rsplit(":", 1)[-1] == str(port) and ":" in p), None
-        )
-        if local is None:
+        # `ss -ltnp`: State Recv-Q Send-Q LocalAddress:Port PeerAddress:Port
+        # ... La dirección local es el cuarto campo. Mirar cualquier campo
+        # puede confundir un puerto remoto con el listener que queremos.
+        local = parts[3]
+        if ":" not in local or local.rsplit(":", 1)[-1] != str(port):
             continue
         for match in re.finditer(r"pid=(\d+)", line):
             pids.add(int(match.group(1)))
+    return pids
+
+
+def parse_netstat_linux_listening(output: str, port: int) -> set[int]:
+    """PIDs de `netstat -ltnp` en Linux.
+
+    El fallback de Linux antes reutilizaba `parse_ss_listening`, pero netstat
+    no escribe ``pid=1234``: usa ``1234/programa``. En un Debian sin `ss`, el
+    fallback por lo tanto devolvía siempre vacío.
+    """
+    pids: set[int] = set()
+    for line in output.splitlines():
+        parts = line.split()
+        # tcp 0 0 127.0.0.1:8899 0.0.0.0:* LISTEN 1234/python
+        if len(parts) < 7 or not parts[0].lower().startswith("tcp"):
+            continue
+        if parts[5].upper() != "LISTEN":
+            continue
+        local = parts[3]
+        if ":" not in local or local.rsplit(":", 1)[-1] != str(port):
+            continue
+        pid_texto = parts[6].split("/", 1)[0]
+        try:
+            pid = int(pid_texto)
+        except ValueError:
+            continue
+        if pid > 0:
+            pids.add(pid)
     return pids
 
 
@@ -228,7 +300,7 @@ def listening_pids(port: int) -> set[int]:
     # Linux/macOS: `ss` es lo estándar hoy; si no está, se cae a netstat.
     for argv, parser in (
         (["ss", "-ltnp"], parse_ss_listening),
-        (["netstat", "-ltnp"], parse_ss_listening),
+        (["netstat", "-ltnp"], parse_netstat_linux_listening),
     ):
         try:
             result = run_quiet(argv, timeout=20)
@@ -241,8 +313,32 @@ def listening_pids(port: int) -> set[int]:
     return set()
 
 
-def port_in_use(port: int) -> bool:
-    return bool(listening_pids(port))
+def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """¿Hay algo escuchando ahí? Con un connect, no con `netstat`.
+
+    ESTA FUNCIÓN ERA EL CUELLO DE BOTELLA DE TODO EL ORQUESTADOR.
+
+    Llamaba a `listening_pids`, que corre `netstat -ano` y parsea la tabla de
+    conexiones ENTERA de la máquina. En una PC con tráfico eso tarda entre
+    medio segundo y dos. Y se llama en todos lados: para saber si un servicio
+    está vivo, en cada vuelta de la espera de arranque, en cada vuelta de la
+    verificación de que un puerto quedó libre.
+
+    Encender el núcleo terminaba corriendo netstat decenas de veces para
+    contestar seis preguntas de sí o no.
+
+    Un connect a loopback contesta lo mismo en microsegundos. Un servicio que
+    escucha en 0.0.0.0 también acepta por 127.0.0.1, así que cubre los dos
+    casos de esta suite. `listening_pids` sigue existiendo y sigue usando
+    netstat, pero solo se llama cuando de verdad hay que MATAR algo, que es
+    cuando hace falta saber el PID.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.25)
+        try:
+            return s.connect_ex((host, int(port))) == 0
+        except OSError:
+            return False
 
 
 def kill_pid(pid: int) -> tuple[bool, str]:
@@ -294,10 +390,21 @@ def kill_pid(pid: int) -> tuple[bool, str]:
 def free_port(port: int, timeout: float = 6.0) -> tuple[bool, str]:
     """Libera un puerto: mata a quien lo escuche y ESPERA a confirmar que
     quedó libre (Windows tarda un instante en soltarlo). Devuelve (ok,
-    detalle) contando lo que realmente pasó."""
+    detalle) contando lo que realmente pasó.
+
+    El camino feliz (el puerto ya estaba libre) no corre `netstat` ni una vez:
+    se pregunta con un connect. Es el caso de casi todos los encendidos, y
+    antes costaba una tabla de conexiones completa por cada puerto.
+    """
+    if not port_in_use(port):
+        return True, f"puerto {port}: ya estaba libre"
     pids = listening_pids(port)
     if not pids:
-        return True, f"puerto {port}: ya estaba libre"
+        # Escucha algo pero no se pudo averiguar el PID: pasa cuando el
+        # proceso es de otro usuario. Se dice, en vez de informar que quedó
+        # libre.
+        return False, (f"puerto {port} ocupado y no pude averiguar por quién "
+                       "(¿es de otro usuario?)")
 
     detalles = []
     todo_ok = True
@@ -323,11 +430,14 @@ def free_port(port: int, timeout: float = 6.0) -> tuple[bool, str]:
             todo_ok = True
 
     # Verificación real: esperar hasta que el puerto deje de estar escuchado.
+    # Con connect y no con netstat: son decenas de vueltas.
     fin = time.time() + timeout
+    espera = 0.03
     while time.time() < fin:
-        if not listening_pids(port):
+        if not port_in_use(port):
             return True, f"puerto {port} liberado ({'; '.join(detalles)})"
-        time.sleep(0.25)
+        time.sleep(min(espera, max(0.0, fin - time.time())))
+        espera = min(espera * 1.6, 0.25)
 
     restantes = listening_pids(port)
     motivo = "; ".join(detalles) if detalles else "sin detalle"
@@ -356,12 +466,40 @@ def windows_service_running(service_name: str) -> bool:
 
 
 def wait_port_listening(port: int, timeout: float = 8.0) -> bool:
-    """Espera a que algo empiece a escuchar en el puerto (para confirmar que
-    un servicio arrancó de verdad). Devuelve apenas aparece."""
+    """Espera a que algo empiece a escuchar en el puerto. Devuelve apenas aparece."""
+    return not esperar_puertos({"": port}, timeout)
+
+
+def esperar_puertos(puertos: dict, timeout: float = 8.0) -> list:
+    """Espera a que TODOS empiecen a escuchar. Devuelve los que no llegaron.
+
+    POR QUÉ TODOS JUNTOS Y NO UNO POR UNO
+
+    Porque esperar en fila multiplica el peor caso por la cantidad. Con seis
+    servicios y ocho segundos cada uno, un encendido donde nada arranca se
+    quedaba 48 segundos mirando puertos, de a uno, cuando los seis ya se
+    habían lanzado al mismo tiempo hacía rato. Mirándolos todos en cada vuelta,
+    el peor caso vuelve a ser ocho segundos.
+
+    No hacen falta hilos: preguntar por un puerto de loopback es un connect que
+    tarda microsegundos, y seis por vuelta no se notan.
+
+    EL INTERVALO CRECE
+
+    Se arranca preguntando cada 30 ms y se va estirando hasta 250. Los
+    servicios de esta suite abren su puerto en unos cientos de milisegundos
+    cuando pueden, así que el caso normal termina en la primera décima de
+    segundo en vez de esperar al primer tic de un cuarto de segundo. Y cuando
+    algo no va a arrancar, el intervalo largo evita preguntar mil veces al
+    pedo.
+    """
+    faltan = dict(puertos)
     fin = time.time() + timeout
+    espera = 0.03
     while True:
-        if port_in_use(port):
-            return True
-        if time.time() >= fin:
-            return False
-        time.sleep(0.25)
+        faltan = {nombre: port for nombre, port in faltan.items()
+                  if not port_in_use(port)}
+        if not faltan or time.time() >= fin:
+            return list(faltan)
+        time.sleep(min(espera, max(0.0, fin - time.time())))
+        espera = min(espera * 1.6, 0.25)

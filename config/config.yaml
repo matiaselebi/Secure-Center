@@ -1,16 +1,18 @@
-# SecureCenter orquesta los otros tres proyectos: no reimplementa nada, solo
-# los prende/apaga y muestra su estado. Necesita saber dónde están.
+# SecureCenter orquesta los otros proyectos: no reimplementa nada, solo los
+# prende/apaga y muestra su estado. Necesita saber dónde están.
 
 paths:
-  # Vacío = autodetectar. SecureCenter busca los tres entre las carpetas
-  # hermanas (las que están al lado suyo, dentro de tu carpeta de proyectos),
+  # Vacío = autodetectar. SecureCenter los busca entre las carpetas hermanas
+  # (las que están al lado suyo, dentro de tu carpeta de proyectos),
   # reconociéndolos por su paquete (src/secureproxy, src/securedns,
-  # src/securevpn) sin importar cómo se llame la carpeta.
+  # src/securevpn, src/securehips, src/secureintel) sin importar cómo se llame la carpeta.
   # Si los tenés en otro lado, poné acá la ruta a cada carpeta, por ejemplo:
   #   proxy: "C:/Users/vos/Proyectos/Secure-Proxy"
   proxy: ""
   dns: ""
   vpn: ""
+  hips: ""
+  intel: ""
 
 ports:
   # SecureProxy tiene DOS puertos: por el 8888 proxea (es el que dice si el
@@ -18,9 +20,11 @@ ports:
   # dashboard, que vive en su propio puerto.
   proxy_service: 8888
   proxy_dashboard: 8889
-  # SecureDNS y SecureVPN usan un solo puerto para su panel.
+  # SecureDNS, SecureVPN, SecureHIPS y Secure-Intel usan un solo puerto para su panel.
   dns_dashboard: 8890
   vpn_dashboard: 8891
+  hips_dashboard: 8892
+  intel_dashboard: 8893
   # Puerto del dashboard unificado de SecureCenter.
   center_dashboard: 8899
 
@@ -28,3 +32,50 @@ dashboard_host: "127.0.0.1"
 
 logging:
   db_path: "data/center_logs.db"
+
+# Motores de afuera cuyos datos entran a la correlación, pero que no son
+# proyectos de la suite: no tienen carpeta hermana, ni venv, ni script de
+# arranque. Por eso van por ruta absoluta.
+#
+# Vacío = no está instalado y no se intenta leer nada.
+externos:
+  # Base de consultas de Pi-hole. SE LEE EN SOLO LECTURA, siempre: la escribe
+  # un proceso ajeno que no sabe que existimos.
+  #
+  # Es la fuente más rica de todas, porque ve a TODOS los dispositivos de la
+  # casa y no solo a esta máquina.
+  #
+  #   pihole_db: "/etc/pihole/pihole-FTL.db"
+  pihole_db: ""
+
+  # Salida de Suricata. Es OPCIONAL y pesado: mirá antes la fila
+  # "Suricata: hardware" del diagnóstico, que te dice si este equipo da.
+  #
+  # Se lee solo la COLA del archivo (los últimos 2 MB), porque en un gateway
+  # con tráfico real esto pesa cientos de megas y el panel se repinta cada
+  # pocos segundos.
+  #
+  # Tiene que estar en modo SOLO DETECCIÓN (af-packet, no NFQUEUE). El que
+  # bloquea es SecureHIPS, que tiene vencimiento, lista blanca y un botón para
+  # levantar el bloqueo; una regla del ruleset abierto cortando sola no tiene
+  # nada de eso.
+  #
+  #   suricata_eve: "/var/log/suricata/eve.json"
+  suricata_eve: ""
+
+  # Solo se lee para verificar que NO esté en modo IPS.
+  suricata_yaml: "/etc/suricata/suricata.yaml"
+
+# Cómo se deja el núcleo arrancando solo con la máquina.
+#
+# SOLO APLICA EN LINUX. En Windows es siempre una tarea programada que corre
+# al iniciar sesión, con permisos limitados, y no hay nada que elegir.
+arranque:
+  # "usuario" -> unidad de systemd en ~/.config/systemd/user/. No necesita
+  #              root. Es lo correcto en una máquina de escritorio.
+  #              OJO: en un servidor donde nadie inicia sesión NO arranca sola
+  #              hasta que corras:  sudo loginctl enable-linger TU-USUARIO
+  #              SecureCenter te lo avisa si falta.
+  # "sistema" -> unidad en /etc/systemd/system/. Arranca en el boot sin que
+  #              nadie entre. Necesita root. Es lo del servidor de Debian.
+  alcance: "usuario"

@@ -1,0 +1,30 @@
+# Va en /etc/systemd/network/10-lan.network
+#
+# La interfaz que mira a la casa. Dirección fija, porque es la puerta de enlace
+# que van a tener escritos todos los equipos: si cambia, la casa se queda sin
+# internet y nadie va a saber por qué.
+#
+# La interfaz que mira al módem (la WAN) NO se toca: sigue con DHCP como
+# siempre. Es parte de que esto sea reversible.
+#
+#   sudo cp 10-lan.network /etc/systemd/network/
+#   sudo systemctl enable --now systemd-networkd
+#
+# Para revertir:  sudo rm /etc/systemd/network/10-lan.network
+#                 sudo systemctl restart systemd-networkd
+
+[Match]
+Name=eth1
+
+[Network]
+Address=192.168.50.1/24
+
+# El DHCP de la casa lo da dnsmasq, que ya está instalado porque es el que usa
+# Pi-hole. No se pone DHCPServer=yes acá: serían dos servidores de DHCP en la
+# misma red contestando lo mismo, y el que gana es el que contesta más rápido,
+# o sea que el resultado cambia de un arranque a otro.
+DHCPServer=no
+
+# Sin gateway: la ruta por defecto la pone la WAN. Poner una acá es la forma
+# más rápida de que la máquina se quede sin internet ella misma.
+IPv6AcceptRA=no

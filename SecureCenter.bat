@@ -38,7 +38,8 @@ echo ================================================
 echo   SecureCenter - Centro de control del stack  (admin)
 echo ================================================
 echo.
-echo  1. Encender NUCLEO   (SecureProxy + SecureDNS + dashboard, inicio automatico)
+echo  1. Encender NUCLEO   (todo menos la VPN: Proxy, DNS, HIPS, Intel,
+echo                        Scanner, Agent y los dashboards)
 echo  2. Apagar TODO       (nucleo + VPN si estaba + quita inicio automatico)
 echo  3. Encender VPN      (todo en uno: laboratorio + aprovisionar + conectar)
 echo  4. Apagar VPN
@@ -50,7 +51,13 @@ echo  9. Salir
 echo.
 echo  (todo esto tambien se maneja desde el dashboard: %DASHBOARD_URL%)
 echo.
+REM ---- Se LIMPIA la variable antes de pedirla. Sin esto, apretar Enter sin
+REM ---- escribir nada dejaba el valor de la vuelta anterior, asi que si antes
+REM ---- habias elegido 1, el Enter volvia a encender el nucleo sin que se lo
+REM ---- pidieras. Vacio ahora vuelve al menu y no pasa nada.
+set "opcion="
 set /p opcion="Elegi una opcion (1-9): "
+if not defined opcion goto menu
 
 if "%opcion%"=="1" goto nucleo
 if "%opcion%"=="2" goto apagar
@@ -83,7 +90,12 @@ exit /b 0
 
 REM ---- Imprime activo/apagado para el servicio %1 en el puerto %2 (netstat) ----
 :check_estado
-netstat -an | findstr ":%2 " | findstr /I "LISTENING" >nul 2>&1
+REM ---- Busca en la FOTO que ya sacamos, no vuelve a correr netstat.
+REM ---- Antes cada renglon corria "netstat -an" entero: ocho renglones eran
+REM ---- ocho recorridas de la tabla de conexiones completa de la maquina, y
+REM ---- en una PC con trafico eso son varios segundos para mostrar ocho
+REM ---- palabras. Una sola foto contesta las ocho preguntas.
+findstr ":%2 " "%FOTO%" | findstr /I "LISTENING" >nul 2>&1
 if errorlevel 1 (echo   %~1 : apagado) else (echo   %~1 : activo)
 exit /b 0
 
@@ -91,7 +103,7 @@ exit /b 0
 echo.
 echo Dejando el dashboard unificado corriendo (sin ventana, y con Windows)...
 call :asegurar_dashboard
-echo Encendiendo el nucleo (SecureProxy + SecureDNS)...
+echo Encendiendo el nucleo (todo menos la VPN)...
 "%PYTHON%" scripts\start_core.py
 echo.
 echo Abriendo el dashboard: %DASHBOARD_URL%
@@ -131,10 +143,18 @@ goto menu
 
 :estado
 echo.
+REM ---- UNA sola foto de los puertos para los ocho chequeos de abajo.
+set "FOTO=%TEMP%\securecenter-puertos.txt"
+netstat -an > "%FOTO%" 2>nul
 call :check_estado "SecureProxy " 8888
 call :check_estado "SecureDNS   " 8890
 call :check_estado "SecureVPN   " 8891
+call :check_estado "SecureHIPS  " 8892
+call :check_estado "Secure-Intel" 8893
+call :check_estado "Secure-Scan " 8894
+call :check_estado "Secure-Agent" 8895
 call :check_estado "SecureCenter" 8899
+del "%FOTO%" >nul 2>&1
 echo.
 schtasks /query /tn "SecureCenterCoreAutostart" >nul 2>&1
 if errorlevel 1 (
@@ -158,10 +178,19 @@ goto menu
 
 :apagar_dashboards
 echo.
-echo Esto apaga SOLO las paginas web de SecureCenter y SecureVPN.
-echo El filtrado (proxy y DNS) y el tunel siguen funcionando igual.
-echo Los dashboards de SecureProxy y SecureDNS no se pueden apagar por
-echo separado: viven dentro del mismo proceso que filtra.
+echo Esto apaga las paginas web de SecureCenter, SecureVPN y Secure-Intel.
+echo El filtrado (proxy y DNS), la vigilancia del HIPS y el tunel siguen
+echo funcionando igual.
+echo.
+echo En Secure-Intel el panel es casi todo el proceso, asi que se apaga
+echo entero. No pasa nada: los feeds que ya bajo siguen en su lugar y los
+echo otros tres los leen igual. Lo unico que se pierde es que se pongan
+echo al dia solos.
+echo.
+echo Los dashboards de SecureProxy, SecureDNS y SecureHIPS NO se pueden
+echo apagar por separado: viven dentro del mismo proceso que hace el
+echo trabajo. Apagar el del HIPS seria apagar la vigilancia y encima
+echo dejarle las reglas puestas en el firewall.
 echo.
 "%PYTHON%" scripts\stop_dashboards.py
 echo.

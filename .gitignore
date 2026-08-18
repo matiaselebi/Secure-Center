@@ -1,7 +1,32 @@
-venv/
+# Python
 __pycache__/
-*.pyc
-.pytest_cache/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+build/
+dist/
 
+# Tests y herramientas
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+graphify-out/
+
+# Secretos
+.env
+.env.*
+!.env.example
+
+# Bases, logs y estado local
 data/*
 !data/.gitkeep
+*.log
+
+# Editor y Windows
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

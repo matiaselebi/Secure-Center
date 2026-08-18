@@ -1,0 +1,100 @@
+# Fragmento para pegar en /etc/suricata/suricata.yaml
+#
+# Reemplaza la sección `outputs` que trae el paquete. Es la fase 3 del punto 9
+# de la hoja de ruta: metadata sí, captura completa nunca.
+#
+# POR QUÉ IMPORTA ESTO Y NO ALCANZA CON FILTRAR AL LEER
+#
+# SecureCenter ya tiene una lista blanca de campos: el contenido de un paquete
+# no llega nunca a un evento de la suite. Pero mientras estas opciones estén
+# prendidas, el dato IGUAL SE ESCRIBE en eve.json. La contraseña que alguien
+# tipeó en un formulario sin HTTPS queda ahí, en el disco del gateway, adentro
+# de los backups, legible por cualquiera que tenga una shell en esa máquina.
+#
+# Filtrarlo al leerlo no lo borra del disco. La única forma de que ese dato no
+# exista es que no se escriba.
+#
+# Después de editar:  sudo suricata -T -c /etc/suricata/suricata.yaml
+#                     sudo systemctl restart suricata
+
+outputs:
+  # ---------------------------------------------------------------- eve.json
+  # Es lo único que lee SecureCenter.
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+
+      # Cortar el archivo por tamaño y quedarse con pocas vueltas. Sin esto
+      # crece hasta llenar el disco, y en un gateway el disco lleno no es un
+      # inconveniente: es Pi-hole que deja de resolver y la casa sin internet.
+      #
+      # SecureCenter lee solo la COLA del archivo (los últimos 2 MB), así que
+      # la rotación no le molesta: no guarda ningún offset justamente porque
+      # el archivo rota.
+      rotate-interval: day
+
+      types:
+        - alert:
+            # ---- ESTO ES LO IMPORTANTE ----
+            # Las seis en `no`. Cada una escribe contenido real del tráfico.
+            payload: no                # el paquete en base64
+            payload-printable: no      # el mismo paquete, en texto legible
+            packet: no                 # el paquete entero, con encabezados
+            http-body: no              # el cuerpo del pedido/respuesta HTTP
+            http-body-printable: no
+            tagged-packets: no         # todos los paquetes de un flujo marcado
+
+            # Esta SÍ, y es la que hace que la alerta sirva: trae de qué
+            # familia de malware es la firma, de qué fecha, con qué confianza.
+            # Sin ella queda el número de regla pelado.
+            metadata: yes
+
+        # Metadata de protocolo: el nombre consultado, el SNI del certificado,
+        # el Host del pedido. Son los datos que cruzan una alerta con SecureDNS
+        # y con Pi-hole, y ninguno es contenido.
+        #
+        # Ojo con el volumen: esto escribe una línea por CADA consulta y cada
+        # handshake, no solo por las alertas. En una casa son cientos de miles
+        # de líneas por día. Si el disco es chico, comentá los tres: la suite
+        # ya sabe todo eso por SecureDNS y por SecureProxy.
+        - dns:
+            version: 2
+            requests: no             # solo las respuestas: la mitad de las líneas
+            responses: yes
+        - tls:
+            extended: no             # sin el certificado entero, solo el SNI
+        - http:
+            extended: no             # sin headers completos
+
+        - flow                       # quién habló con quién y cuánto duró
+
+        # NO se habilitan a propósito:
+        #   - files          (metadata de archivos que pasan; sin file-store no
+        #                     los guarda, pero es un volumen enorme)
+        #   - anomaly        (útil, pero ruidoso hasta que lo tengas afinado)
+        #   - drop           (solo tiene sentido en modo IPS, y acá no va)
+
+  # -------------------------------------------------------- LA CAPTURA CRUDA
+  # Guarda los paquetes tal cual pasaron. Es literalmente la captura completa
+  # que este punto de la hoja de ruta dice que no. Apagado, y sin excepciones.
+  - pcap-log:
+      enabled: no
+
+  # ------------------------------------------------- LOS ARCHIVOS EXTRAÍDOS
+  # Guarda en disco los archivos que ve pasar. Un adjunto de mail o un PDF que
+  # alguien bajó terminan ahí, completos.
+  - file-store:
+      version: 2
+      enabled: no
+
+  # Log de texto plano: una línea por alerta, sin contenido. Es cómodo para
+  # mirar con `tail -f` y no lo lee nadie automáticamente.
+  - fast:
+      enabled: yes
+      filename: fast.log
+
+  - stats:
+      enabled: yes
+      filename: stats.log
+      interval: 60

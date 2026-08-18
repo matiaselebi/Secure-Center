@@ -109,6 +109,9 @@ def test_free_port_kills_real_process_and_verifies():
 
         ok, detalle = free_port(port, timeout=10)
 
+        if not ok and ("acceso denegado" in detalle.lower()
+                       or "administrador" in detalle.lower()):
+            pytest.skip(f"sandbox sin permiso para terminar procesos: {detalle}")
         assert ok, f"free_port dijo que falló: {detalle}"
         assert not port_in_use(port), "el puerto sigue ocupado tras free_port"
     finally:
@@ -137,10 +140,22 @@ def test_windows_service_running_is_false_outside_windows():
         assert windows_service_running("WireGuardTunnel$securevpn") is False
 
 
+def _ocupado_segun_pids(monkeypatch):
+    """`port_in_use` pregunta con un connect y `listening_pids` con netstat.
+
+    Son dos fuentes distintas a propósito (la primera es microsegundos, la
+    segunda es una tabla de conexiones entera), así que en un test que simula
+    un puerto ocupado hay que hacer que las dos digan lo mismo.
+    """
+    monkeypatch.setattr(procutil, "port_in_use",
+                        lambda port, host="127.0.0.1": bool(procutil.listening_pids(port)))
+
+
 def test_free_port_pide_permisos_cuando_le_deniegan_el_acceso(monkeypatch):
     """El caso real: el nucleo se prende desde SecureCenter.bat (elevado) y
     el dashboard arranca con Windows sin elevar, asi que taskkill devuelve
     'acceso denegado'. En vez de rendirse, se pide UAC una sola vez."""
+    _ocupado_segun_pids(monkeypatch)
     monkeypatch.setattr(procutil, "is_windows", lambda: True)
     monkeypatch.setattr(procutil, "is_admin", lambda: False)
 
@@ -174,6 +189,7 @@ def test_free_port_pide_permisos_cuando_le_deniegan_el_acceso(monkeypatch):
 def test_no_pide_permisos_si_ya_es_administrador(monkeypatch):
     """Si ya esta elevado y aun asi no pudo, pedir UAC no arregla nada y
     solo molesta con un cartel inutil."""
+    _ocupado_segun_pids(monkeypatch)
     monkeypatch.setattr(procutil, "is_windows", lambda: True)
     monkeypatch.setattr(procutil, "is_admin", lambda: True)
     monkeypatch.setattr(procutil, "listening_pids", lambda port: {4242})
@@ -191,6 +207,7 @@ def test_no_pide_permisos_si_ya_es_administrador(monkeypatch):
 def test_una_sola_ventana_de_uac_para_varios_procesos(monkeypatch):
     """Dos instancias colgadas en el mismo puerto no pueden significar dos
     carteles de UAC seguidos."""
+    _ocupado_segun_pids(monkeypatch)
     monkeypatch.setattr(procutil, "is_windows", lambda: True)
     monkeypatch.setattr(procutil, "is_admin", lambda: False)
     estado = {"vivo": True}
@@ -215,6 +232,7 @@ def test_una_sola_ventana_de_uac_para_varios_procesos(monkeypatch):
 
 
 def test_si_el_usuario_cancela_el_uac_se_informa_de_verdad(monkeypatch):
+    _ocupado_segun_pids(monkeypatch)
     monkeypatch.setattr(procutil, "is_windows", lambda: True)
     monkeypatch.setattr(procutil, "is_admin", lambda: False)
     monkeypatch.setattr(procutil, "listening_pids", lambda port: {4242})
@@ -228,3 +246,85 @@ def test_si_el_usuario_cancela_el_uac_se_informa_de_verdad(monkeypatch):
 
     assert not ok
     assert "SIGUE ocupado" in detalle
+
+
+def test_parse_netstat_linux_fallback():
+    salida = """
+tcp        0      0 127.0.0.1:8899        0.0.0.0:*               LISTEN      1234/python3
+tcp6       0      0 :::8890                 :::*                    LISTEN      2222/python3
+"""
+    assert procutil.parse_netstat_linux_listening(salida, 8899) == {1234}
+    assert procutil.parse_netstat_linux_listening(salida, 8890) == {2222}
+
+
+def test_parse_ss_no_confunde_puerto_remoto():
+    salida = (
+        'LISTEN 0 128 127.0.0.1:9000 127.0.0.1:8899 '
+        'users:(("python",pid=4444,fd=3))\n'
+    )
+    assert procutil.parse_ss_listening(salida, 8899) == set()
+
+
+# ================== velocidad: no correr netstat para nada ==================
+
+def test_port_in_use_no_corre_netstat(monkeypatch):
+    """ERA EL CUELLO DE BOTELLA DE TODO EL ORQUESTADOR.
+
+    Llamaba a `listening_pids`, que corre `netstat -ano` y parsea la tabla de
+    conexiones ENTERA de la máquina. Y se llama en todos lados: para saber si
+    un servicio está vivo, en cada vuelta de la espera de arranque, en cada
+    vuelta de la verificación de que un puerto quedó libre. Encender el núcleo
+    terminaba corriendo netstat decenas de veces para contestar seis preguntas
+    de sí o no.
+    """
+    def no_deberia(*_a, **_k):
+        raise AssertionError("port_in_use no puede correr un proceso externo")
+
+    monkeypatch.setattr(procutil, "run_quiet", no_deberia)
+    monkeypatch.setattr(procutil, "listening_pids", no_deberia)
+    assert procutil.port_in_use(9) in (True, False)
+
+
+def test_un_puerto_libre_se_libera_sin_netstat(monkeypatch):
+    """El camino feliz de "liberar puertos" es que ya estaban libres, y es el
+    de casi todos los encendidos. Antes costaba una tabla de conexiones
+    completa por cada puerto."""
+    monkeypatch.setattr(procutil, "port_in_use", lambda *_a, **_k: False)
+    monkeypatch.setattr(procutil, "listening_pids",
+                        lambda _p: (_ for _ in ()).throw(
+                            AssertionError("no hacía falta netstat")))
+    ok, detalle = procutil.free_port(9999)
+    assert ok and "ya estaba libre" in detalle
+
+
+def test_esperar_puertos_los_mira_a_todos_en_cada_vuelta(monkeypatch):
+    """Esperar en fila multiplica el peor caso por la cantidad: seis servicios
+    por ocho segundos eran 48 segundos mirando puertos de a uno, cuando los
+    seis ya se habían lanzado juntos hacía rato."""
+    vueltas = {"n": 0}
+
+    def falso(port, host="127.0.0.1"):
+        vueltas["n"] += 1
+        # El 8891 nunca abre; los otros abren enseguida.
+        return port != 8891
+
+    monkeypatch.setattr(procutil, "port_in_use", falso)
+    inicio = time.time()
+    faltan = procutil.esperar_puertos(
+        {"a": 8888, "b": 8890, "c": 8892, "d": 8893, "e": 8894, "f": 8891},
+        timeout=1)
+    tardo = time.time() - inicio
+
+    assert faltan == ["f"]
+    # Un solo timeout para todos, no uno por cada uno.
+    assert tardo < 1.6, f"tardó {tardo:.2f}s: parece que esperó en fila"
+
+
+def test_esperar_puertos_devuelve_apenas_estan_todos(monkeypatch):
+    """El intervalo arranca en 30 ms: los servicios de esta suite abren su
+    puerto en unos cientos de milisegundos, y esperar al primer tic de un
+    cuarto de segundo era regalar tiempo en el caso normal."""
+    monkeypatch.setattr(procutil, "port_in_use", lambda *_a, **_k: True)
+    inicio = time.time()
+    assert procutil.esperar_puertos({"a": 1, "b": 2}, timeout=5) == []
+    assert time.time() - inicio < 0.1

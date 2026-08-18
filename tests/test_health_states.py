@@ -25,6 +25,7 @@ from securecenter.health import (  # noqa: E402
     project_state,
     state_snapshot,
 )
+from securecenter.projects import PROJECT_SPECS  # noqa: E402
 
 
 def _fake_vpn_dashboard(state_body: str | None):
@@ -124,7 +125,9 @@ def test_proxy_state_is_direct_port_check(cfg):
         listener.close()
 
 
-def test_snapshot_has_the_three_keys(cfg):
+def test_el_snapshot_tiene_una_clave_por_proyecto(cfg, monkeypatch):
+    monkeypatch.setattr("securecenter.health._tcp_open", lambda *_args, **_kwargs: False)
     snap = state_snapshot(cfg)
-    assert set(snap) == {"proxy", "dns", "vpn"}
+    assert set(snap) == {s.key for s in PROJECT_SPECS}
+    assert "hips" in snap
     assert all(v == APAGADO for v in snap.values())

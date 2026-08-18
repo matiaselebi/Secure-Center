@@ -15,7 +15,9 @@ class LoggerDB:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=5.0)
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
 
     def _init_schema(self) -> None:
         with self._lock, self._connect() as conn:

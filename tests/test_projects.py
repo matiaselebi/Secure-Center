@@ -4,7 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from securecenter.config_loader import load_config  # noqa: E402
-from securecenter.projects import autodetect_project, discover_projects  # noqa: E402
+from securecenter.projects import (PROJECT_SPECS, autodetect_project,  # noqa: E402
+                                   discover_projects)
 
 
 def test_autodetect_finds_project_by_package_not_by_name(fake_stack):
@@ -52,3 +53,37 @@ def test_venv_python_path_shape(fake_stack, tmp_path):
     python = projects["proxy"].venv_python()
     assert python is not None
     assert python.name in ("python", "python.exe")
+
+
+def test_config_rechaza_dashboard_expuesto_a_la_red(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text('dashboard_host: "0.0.0.0"\n', encoding="utf-8")
+
+    import pytest
+    with pytest.raises(ValueError, match="loopback"):
+        load_config(str(config))
+
+
+def test_config_rechaza_puertos_fuera_de_rango(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text('ports:\n  center_dashboard: 70000\n', encoding="utf-8")
+
+    import pytest
+    with pytest.raises(ValueError, match="puerto inválido"):
+        load_config(str(config))
+
+
+# ---------------- punto: no ofrecer un panel que no existe
+
+def test_secure_agent_no_declara_dashboard():
+    """Su puerto solo recibe POST en /ingesta y a cualquier otra cosa contesta
+    405. El panel ofrecía un link a los 8896, que ni siquiera existe: abrirlo
+    da un error y parece que el servicio está roto cuando está perfecto."""
+    agente = next(s for s in PROJECT_SPECS if s.key == "agente")
+    assert agente.dashboard_path is None
+
+
+def test_los_demas_si_tienen_panel():
+    for spec in PROJECT_SPECS:
+        if spec.key != "agente":
+            assert spec.dashboard_path, spec.key
